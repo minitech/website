@@ -1,0 +1,125 @@
+body {
+	font-family: sans-serif;
+	font-size: 16px;
+	font-size-adjust: 0.6;
+	line-height: 1.5;
+	margin: 16px;
+	max-width: 50em;
+}
+
+h1 {
+	margin-bottom: 0;
+}
+
+[pubdate] {
+	display: block;
+	margin-bottom: 16px;
+}
+
+.snippet {
+	background-color: #eee;
+	color: black;
+	padding: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+	.snippet {
+		filter: invert(1) hue-rotate(180deg);
+	}
+}
+
+.snippet > code, .snippet > samp {
+	display: block;
+	white-space: pre-wrap;
+	tab-size: 3;
+}
+
+.hl-comment {
+	color: #666;
+}
+
+.hl-keyword {
+	color: #03f;
+}
+
+.hl-string {
+	color: #063;
+}
+
+.hl-builtin {
+	color: #c36;
+}
+
+.hl-literal {
+	color: #963;
+}
+
+.hl-nested {
+	color: black;
+}
+
+.wiki-citation-needed {
+	background-color: white;
+	color: black;
+	font-size: smaller;
+}
+
+.wiki-citation-needed > i {
+	color: #36c;
+}
+
+blockquote {
+	border-left: 4px solid #eee;
+	margin-left: 0;
+	padding-left: 12px;
+}
+
+ul {
+	padding-left: 16px;
+}
+
+@keyframes magic {
+	from {
+		background-position: 0 0;
+	}
+	to {
+		background-position: 125px 0;
+	}
+}
+
+@supports (-webkit-background-clip: text) {
+	.magic {
+		animation: magic 1s linear infinite;
+		background-image: linear-gradient(
+			to right,
+			hsl(0deg 100% 50%),
+			hsl(45deg 100% 50%),
+			hsl(90deg 100% 50%),
+			hsl(135deg 100% 50%),
+			hsl(180deg 100% 50%),
+			hsl(225deg 100% 50%),
+			hsl(270deg 100% 50%),
+			hsl(315deg 100% 50%),
+			hsl(360deg 100% 50%)
+		);
+		background-size: 125px 100%;
+		display: inline-block;
+		-webkit-background-clip: text;
+		-webkit-text-fill-color: transparent;
+	}
+}
+
+figure {
+	margin: 0;
+}
+
+figcaption {
+	text-align: center;
+	font-style: italic;
+	color: #999;
+}
+
+.snippet ins {
+	background-color: #cfd;
+	text-decoration: none;
+}

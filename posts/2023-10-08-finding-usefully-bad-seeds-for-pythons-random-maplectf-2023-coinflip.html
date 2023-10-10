@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+<meta charset="utf-8">
+<meta name="viewport" content="initial-scale=1, width=device-width">
+
+<title>Finding usefully bad seeds for Python’s Random: MapleCTF 2023 coinflip</title>
+
+<link rel="stylesheet" href="post.css">
+
+<script defer src="highlight.js"></script>
+
+<body>
+
+<h1>Finding usefully bad seeds for Python’s <code>Random</code>: MapleCTF 2023 <tt>coinflip</tt></h1>
+<time pubdate>2023-10-08</time>
+
+<details open>
+	<summary>The challenge is a Python program that we interact with…</summary>
+
+<pre class="snippet python"><code>from random import Random
+from secret import FLAG
+import signal
+
+class Coin:
+	def __init__(self, coin_id):
+		self.random = Random(coin_id)
+		self.flips_left = 0
+		self.buffer = None
+
+	def flip(self):
+		if self.flips_left == 0:
+			self.buffer = self.random.getrandbits(32)
+			self.flips_left = 32
+		res = self.buffer & 1
+		self.buffer >>= 1
+		self.flips_left -= 1
+		return res
+
+if __name__ == "__main__":
+	signal.alarm(60)
+	print("Welcome to Maple Betting!")
+	print("We'll be betting on the outcome of a fair coin flip.")
+	print("You'll start with $1 - try to make lots of money and you'll get flags!")
+
+	game_id = input("Which coin would you like to use? ")
+	num_rounds = input("How many rounds do you want to go for? ")
+	num_rounds = int(num_rounds)
+	if num_rounds > 20_000_000:
+		print("Can't play that long, I'm afraid.")
+		exit(1)
+
+	print("Alright, let's go!")
+	coin = Coin(int(game_id, 0))
+	money = 1
+	for nr in range(num_rounds):
+		money += [1, -1][coin.flip()]
+		if money &lt;= 0:
+			print(f"Oops, you went broke at round {nr+1}!")
+			exit(1)
+
+	print(f"You finished with ${money} in the pot.")
+	if money &lt; 18_000:
+		print("At least you didn't go broke!")
+	elif money &lt; 7_000_000:
+		print(f"Pretty good!")
+	else:
+		print(f"What the hell?! You bankrupted the casino! Take your spoils: {FLAG}")</code></pre>
+</details>
+
+<p>At face value, it looks like the goal is <code>Random.getrandbits</code> to return a lot more zero bits than one bits, where “a lot more” is a net bias of 7 million over 7–20 million attempts. That’s not going to happen by chance even with the brutest of brute force, but the ability to provide a random seed is pretty suggestive. Let’s take a look at <a href="https://github.com/python/cpython/blob/7e30821b17b56bb5ed9799f62eb45e448cb52c8e/Modules/_randommodule.c#L286">the CPython source for the <code>random</code> module</a> to see what it does with an integer seed.</p>
+
+<details open>
+	<summary>A choice excerpt after following the trail from <code>Py_tp_init</code> through _randommodule.c…</summary>
+
+	<pre class="snippet c"><code>/* Convert seed to byte sequence. */
+key = (uint32_t *)PyMem_Malloc((size_t)4 * keyused);
+if (key == NULL) {
+	PyErr_NoMemory();
+	goto Done;
+}
+res = _PyLong_AsByteArray((PyLongObject *)n,
+                          (unsigned char *)key, keyused * 4,
+                          PY_LITTLE_ENDIAN,
+                          0); /* unsigned */
+if (res == -1) {
+	goto Done;
+}
+
+/* [...] */
+
+init_by_array(self, key, keyused);</code></pre>
+</details>
+
+<p>Okay, progress! Looks like Python takes an arbitrarily large <code>int</code> and uses it pretty directly to seed a Mersenne Twister <abbr title="random number generator">RNG</abbr> – no extra hashing or anything. <a href="https://en.wikipedia.org/wiki/Mersenne_Twister#Disadvantages">Wikipedia has this to say</a> about the algorithm:</p>
+
+<blockquote>
+	<ul>
+		<li>Contains subsequences with more 0's than 1's. This adds to the poor diffusion property to make recovery from many-zero states difficult.</li>
+	</ul>
+</blockquote>
+
+<p>Hey, <span class="wiki-citation-needed">[<i>citation needed</i>]</span>. But that sounds promising. I’ll dive into the rest of the relevant parts of _randommodule.c and translate them to Python:</p>
+
+<pre class="snippet python"><code>N = 624
+M = 397
+MATRIX_A = 0x9908b0df
+UPPER_MASK = 0x8000_0000
+LOWER_MASK = 0x7fff_ffff
+
+
+class MersenneTwisterRng:
+	def __init__(self):
+		self.state = [0] * N
+		self.index = 0
+
+	def init_genrand(self, s):
+		assert 0 &lt;= s &lt;= 0xffff_ffff
+
+		mt = self.state = [0] * N
+		mt[0] = s
+
+		for i in range(1, N):
+			mt[i] = (1812433253 * (mt[i-1] ^ (mt[i-1] >> 30)) + i) & 0xffff_ffff
+
+		self.index = N
+
+	def init_by_array(self, init_key):
+		self.init_genrand(19650218)
+		mt = self.state
+
+		i = 1
+		j = 0
+
+		for _ in range(max(N, len(init_key))):
+			mt[i] = ((mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 30)) * 1664525)) + init_key[j] + j) & 0xffff_ffff
+			i += 1
+			j += 1
+			if i >= N:
+				mt[0] = mt[N-1]
+				i = 1
+			if j >= len(init_key):
+				j = 0
+
+		for _ in range(N - 1):
+			mt[i] = ((mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 30)) * 1566083941)) - i) & 0xffff_ffff
+			i += 1
+			if i >= N:
+				mt[0] = mt[N-1]
+				i = 1
+
+		mt[0] = 0x8000_0000  # MSB is 1; assuring non-zero initial array
+
+	def genrand_uint32(self):
+		mt = self.state
+
+		if self.index >= N:
+			mag01 = (0, MATRIX_A)
+			kk = 0
+
+			while kk &lt; N-M:
+				y = (mt[kk]&amp;UPPER_MASK)|(mt[kk+1]&amp;LOWER_MASK)
+				mt[kk] = mt[kk+M] ^ (y >> 1) ^ mag01[y & 0x1]
+				kk += 1
+
+			while kk &lt; N - 1:
+				y = (mt[kk]&amp;UPPER_MASK)|(mt[kk+1]&amp;LOWER_MASK)
+				mt[kk] = mt[kk+(M-N)] ^ (y >> 1) ^ mag01[y & 0x1]
+				kk += 1
+
+			y = (mt[N-1]&amp;UPPER_MASK)|(mt[0]&amp;LOWER_MASK)
+			mt[N-1] = mt[M-1] ^ (y >> 1) ^ mag01[y & 0x1]
+
+			self.index = 0
+
+		y = mt[self.index]
+		self.index += 1
+		y ^= y >> 11
+		y ^= (y &lt;&lt; 7) & 0x9d2c5680
+		y ^= (y &lt;&lt; 15) & 0xefc60000
+		y ^= y >> 18
+		return y</code></pre>
+
+<p>And make sure it’s correct:</p>
+
+<pre class="snippet python"><code>seed = [1, 2, 3, 4]
+seed_int = int.from_bytes(
+	(byte for word in seed for byte in word.to_bytes(4, 'little')),
+	'little')
+
+rng = MersenneTwisterRng()
+rng.init_by_array(seed)
+print(rng.genrand_uint32())
+
+reference = random.Random(seed_int)
+print(reference.getrandbits(32))</code></pre>
+
+<pre class="snippet"><samp>$ <b>python3 mt.py</b>
+2915706234
+2915706234</samp></pre>
+
+<p>Nice.</p>
+
+<p>Looking at that mixing in <code>genrand_uint32</code>, I can see how it would propagate zero-heaviness in a state: the only operation that can bring in new 1 bits is XORing with <code>mag01[y & 0x1]</code>, and <code>mag01[0]</code> is still 0! If <code>init_by_array</code> didn’t guarantee at least one set bit, an initially zero state would stay zero forever. But even though at least this bit is going to be set no matter what, taking into consideration that little bullet point from Wikipedia, what if we artificially try getting as many zeros as possible?</p>
+
+<p>Let’s patch the seeding function:</p>
+
+<pre class="snippet python"><code>mt[:] = [0] * len(mt)
+mt[0] = 0x8000_0000  # MSB is 1; assuring non-zero initial array</code></pre>
+
+<p>And run a quick<sup>1</sup> simulation:</p>
+
+<pre class="snippet python"><code>rng = MersenneTwisterRng()
+rng.init_by_array([0xf00])
+
+money = 1
+for i in range(20_000_000 // 32):
+	w = rng.genrand_uint32()
+
+	for j in range(32):
+		money += -1 if w & 1 else 1
+		w >>= 1
+
+		if money == 0:
+			print("out of money D:")
+			exit()
+
+		if money == 7_000_000:
+			print(f"won! {32 * i + j + 1:,} rounds :)")
+			exit()
+
+print(f"didn’t win with ${money:,} :(")</code></pre>
+
+<pre class="snippet"><samp>$ <b>python3 mt.py</b>
+won! 14,819,683 rounds :)</samp></pre>
+
+<p>That’s a big deal! If we can get the <code>Random</code> instance to start in this state, we can capture the flag. But is it actually possible to produce a state <em>this</em> good from a seed? Well, let’s give it a try, working backwards one step at a time.</p>
+
+<pre class="snippet python"><code>for _ in range(N - 1):
+	mt[i] = ((mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 30)) * 1566083941)) - i) & 0xffff_ffff
+	i += 1
+	if i >= N:
+		mt[0] = mt[N-1]
+		i = 1</code></pre>
+
+<p>Just one pass over <code>mt[1..N]</code>. Shifts and XORs and multiplications, oh my… but notably, if <code>mt[i-1]</code> is zero for an iteration, the entire expression before the final <code>- i</code> will be just the initial value of <code>mt[i]</code>.
+
+<pre class="snippet python"><code>mt[i] = ((mt[i] ^ 0) - i) & 0xffff_ffff</code></pre>
+
+<p>And solving <code>mt[i] - i == 0</code> for <code>mt[i]</code> is pretty doable. Let’s verify:</p>
+
+<pre class="snippet python"><code><ins>i = 1
+mt[:] = range(N)</ins>
+
+for _ in range(N - 1):
+	mt[i] = ((mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 30)) * 1566083941)) - i) & 0xffff_ffff
+	<ins>assert mt[i] == 0</ins>
+	i += 1
+	if i >= N:
+		mt[0] = mt[N-1]
+		i = 1</code></pre>
+
+<p>Yep, that still passes. Now, can we get those initial conditions – <code>i = 1</code> and <code>mt = [0, 1, 2, …, 623]</code> – from the only remaining loop that involves the seed?</p>
+
+<h2>No</h2>
+
+<pre class="snippet python"><code>i = 1
+j = 0
+
+for _ in range(max(N, len(init_key))):
+	mt[i] = ((mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 30)) * 1664525)) + init_key[j] + j) & 0xffff_ffff
+	i += 1
+	j += 1
+	if i >= N:
+		mt[0] = mt[N-1]
+		i = 1
+	if j >= len(init_key):
+		j = 0</code></pre>
+
+<p>This step again has the convenient property that the value of <code>mt[i]</code> after an iteration is a simple sum of
+
+<ul>
+	<li>a function of <code>mt[i-1]</code> and <code>mt[i]</code>,
+	<li><code>j</code>,
+	<li>and a word from <code>init_key</code> (the seed).
+</ul>
+
+<p>Setting <code>mt[i]</code> to an arbitrary value is as easy as calculating the <code>stuff</code> that gets added to <code>init_key[j]</code> and cancelling it out with the magic of the additive inverse before adding the desired value.</p>
+
+<pre class="snippet python"><code>for _ in range(max(N, len(init_key))):
+	desired = i
+	stuff = (mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 30)) * 1664525)) + j
+	init_key[j] = (desired <span class="magic">-</span> stuff) & 0xffff_ffff</code></pre>
+
+<p>We can make <code>init_key</code> the right length to set <code>i</code> to any value we want within range, too, since it increments through the 1..N&minus;1 range according to according to <code>max(N, len(init_key))</code>.</p>
+
+<pre class="snippet python"><code>i = 1
+j = 0
+<ins>init_key = [0] * (2 * (N - 1))</ins>
+
+for _ in range(max(N, len(init_key))):
+	<ins>desired = i
+	stuff = (mt[i] ^ ((mt[i-1] ^ (mt[i-1] >> 30)) * 1664525)) + j
+	init_key[j] = (desired - stuff) & 0xffff_ffff</ins>
+	mt[i] = (stuff + init_key[j]) & 0xffff_ffff
+	i += 1
+	j += 1
+	if i >= N:
+		mt[0] = mt[N-1]
+		i = 1
+	if j >= len(init_key):
+		j = 0
+
+<ins>assert i == 1
+assert mt == range(N)</ins></code></pre>
+
+<p>Give it a run, and…</p>
+
+<figure>
+	<pre class="snippet"><samp>$ <b>python3 -m pdb -c continue mt.py</b>
+⋮
+    assert mt == range(N)
+           ^^^^^^^^^^^^^^
+AssertionError
+(Pdb) <b>p mt[:10]</b>
+[623, 1, 2, 3, 4, 5, 6, 7, 8, 9]</samp></pre>
+
+	<figcaption>“Well, there’s your problem”</figcaption>
+</figure>
+
+<p>This step has the inconvenient property that <code>mt[0]</code> is always equal to <code>mt[N-1]</code>. But backtracking forwards a bit, can we just work with this new initial state? Only <code>mt[0]</code> is wrong, and a function of it is only XORed with <code>mt[1]</code> like this:</p>
+
+<pre class="snippet python"><code>mt[1] = ((mt[1] ^ ((mt[0] ^ (mt[0] >> 30)) * 1566083941)) - 1) & 0xffff_ffff</code></pre>
+
+<p>So… we XOR the unwanted <code>(mt[0] ^ (mt[0] >> 30)) * 1566083941</code> back out from the initial value of <code>mt[1]</code>?</p>
+
+<pre class="snippet python"><code>desired = i
+
+<ins>if i == 1:
+	desired ^= ((623 ^ (623 >> 30)) * 1566083941) & 0xffff_ffff</ins></code></pre>
+
+<pre class="snippet"><samp>$ <b>python3 mt.py</b>
+won! 14,819,683 rounds :)</samp></pre>
+
+<p>We do!! One last step…</p>
+
+<pre class="snippet python"><code>seed_int = int.from_bytes(
+	(byte for word in init_key
+	      for byte in word.to_bytes(4, 'little')),
+	'little')
+
+with open('magic.txt', 'x') as f:
+	print(hex(seed_int), file=f)</code></pre>
+
+<pre class="snippet"><samp>$ <b>(cat magic.txt; echo 14819683) | nc coinflip.ctf.maplebacon.org 1337</b>
+Welcome to Maple Betting!
+We'll be betting on the outcome of a fair coin flip.
+You'll start with $1 - try to make lots of money and you'll get flags!
+Which coin would you like to use? How many rounds do you want to go for? Alright, let's go!
+You finished with $7000000 in the pot.
+What the hell?! You bankrupted the casino! Take your spoils: maple{1nv3rt_m3rs3nne_tw1ster,bet,pr0f1t!!1!_0aa3a8efe77eaade}</samp></pre>
+
+<p>🎉</p>
+
+<hr>
+<p><small><sup>1</sup> Not that quick. I secretly used a faster but less readable option.</small></p>
